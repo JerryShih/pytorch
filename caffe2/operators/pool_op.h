@@ -10,7 +10,7 @@
 
 namespace caffe2 {
 
-template <typename T, class Context, typename PoolType>
+template <typename T, class Context, typename PoolType, bool LowPrecision=false>
 class PoolOp final : public ConvPoolOpBase<Context> {
  public:
   USE_CONV_POOL_BASE_FUNCTIONS(Context);
@@ -35,6 +35,11 @@ class PoolOp final : public ConvPoolOpBase<Context> {
 
   // Input: X
   // Output: Y
+
+ private:
+  void QuantizeInput();
+
+  Tensor input_lp{Context::GetDeviceType()};
 };
 
 template <typename T, class Context, class PoolType>

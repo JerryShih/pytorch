@@ -2,6 +2,7 @@
 #include "caffe2/operators/pool_op.h"
 #include "caffe2/utils/cpu_neon.h"
 #include "caffe2/utils/eigen_utils.h"
+#include "caffe2/core/scope_guard.h"
 
 namespace caffe2 {
 
@@ -492,13 +493,101 @@ class MaxPool {
   }
 };
 
-template <typename T, class Context, typename PoolType>
-bool PoolOp<T, Context, PoolType>::RunOnDeviceWithOrderNCHW() {
+template <typename T, class Context, typename PoolType, bool LowPrecision>
+void PoolOp<T, Context, PoolType, LowPrecision>::QuantizeInput() {
+  if (LowPrecision) {
+    input_lp.CopyFrom(Input(0));
+
+    const auto& def = this->debug_def();
+    if (this->GetInputCalibrationParam(def.input(0))) {
+      float input_threshold = this->GetInputCalibrationParam(def.input(0))
+                                  ->blob_param(0)
+                                  .threshold_y();
+      input_lp.Quantize<T, int8_t>(128.0f, input_threshold, 0);
+    }
+  }
+}
+
+template <typename T, class Context, typename PoolType, bool LowPrecision>
+class OutputPostProcess {
+ public:
+  static void process(
+      Tensor* output,
+      const LayerCalibrationParameter* op_calibration_param);
+};
+
+template <typename T, class Context, bool LowPrecision>
+class OutputPostProcess<T, Context, MaxPool<T>, LowPrecision> {
+ public:
+  static void process(
+      Tensor* output,
+      const LayerCalibrationParameter* op_calibration_param) {
+    if (LowPrecision) {
+      Tensor output_lp(output->dims(), Context::GetDeviceType());
+      output_lp.ShareData(*output);
+      if (op_calibration_param) {
+        float scale = op_calibration_param->threshold_x_quantized(0);
+        float output_threshold =
+            op_calibration_param->blob_param(0).threshold_y();
+        float right_shift = op_calibration_param->right_shift_width();
+
+        T* data = output_lp.mutable_data<T>();
+        for (int i = 0; i < output_lp.size(); ++i) {
+          data[i] *= scale;
+        }
+        output_lp.RightShift<T>(right_shift);
+        output_lp.Saturate<T, int8_t>();
+        output_lp.DequantizeInt8<T>(output_threshold);
+      }
+    }
+  }
+};
+
+template <typename T, class Context, bool LowPrecision>
+class OutputPostProcess<T, Context, AveragePool<T>, LowPrecision> {
+ public:
+  static void process(
+      Tensor* output,
+      const LayerCalibrationParameter* op_calibration_param) {
+    if (LowPrecision) {
+      Tensor output_lp(output->dims(), Context::GetDeviceType());
+      output_lp.ShareData(*output);
+      if (op_calibration_param) {
+        float scale = op_calibration_param->threshold_x_quantized(0);
+        float output_threshold =
+            op_calibration_param->blob_param(0).threshold_y();
+        float right_shift = op_calibration_param->right_shift_width();
+
+        T* data = output_lp.mutable_data<T>();
+        for (int i = 0; i < output_lp.size(); ++i) {
+          data[i] *= scale;
+        }
+        output_lp.RightShift<T>(right_shift);
+        output_lp.Saturate<T, int8_t>();
+        output_lp.DequantizeInt8<T>(output_threshold);
+      }
+    }
+  }
+};
+
+template <typename T, class Context, typename PoolType, bool LowPrecision>
+bool PoolOp<T, Context, PoolType, LowPrecision>::RunOnDeviceWithOrderNCHW() {
+  if(LowPrecision){
+    printf("bignose test poollp %s\n",
+           this->debug_def().op_calibration_param().name().c_str());
+  }
+
   auto& X = Input(0);
   auto* Y = Output(0);
   ConvPoolOpBase<Context>::SetOutputSize(X, Y, X.dim32(1));
 
-  const float* Xdata = X.template data<float>();
+  QuantizeInput();
+  auto dequantizeOutputGuard = MakeGuard([&] {
+    OutputPostProcess<T, Context, PoolType, LowPrecision>::process(
+        Output(0), this->GetOpCalibrationParam());
+  });
+
+  const float* Xdata = (LowPrecision) ? input_lp.data<T>() : X.template data<float>();
   float* Ydata = Y->template mutable_data<float>();
   // The main loop
   int channels = X.dim32(1);
@@ -628,8 +717,13 @@ bool PoolOp<T, Context, PoolType>::RunOnDeviceWithOrderNCHW() {
   return true;
 }
 
-template <typename T, class Context, typename PoolType>
-bool PoolOp<T, Context, PoolType>::RunOnDeviceWithOrderNHWC() {
+template <typename T, class Context, typename PoolType, bool LowPrecision>
+bool PoolOp<T, Context, PoolType, LowPrecision>::RunOnDeviceWithOrderNHWC() {
+  if(LowPrecision){
+    printf("bignose test poollp %s\n",
+           this->debug_def().op_calibration_param().name().c_str());
+  }
+
   auto& X = Input(0);
   auto* Y = Output(0);
   int height = X.dim32(1);
@@ -638,10 +732,18 @@ bool PoolOp<T, Context, PoolType>::RunOnDeviceWithOrderNHWC() {
   int channels = X.dim32(X.dim() - 1);
   ConvPoolOpBase<Context>::SetOutputSize(X, Y, channels);
 
-  EigenMatrixMap<float> Ymat(
-      Y->template mutable_data<float>(), channels, Y->numel() / channels);
-  ConstEigenMatrixMap<float> Xmat(
-      X.template data<float>(), channels, X.numel() / channels);
+  QuantizeInput();
+  auto dequantizeOutputGuard=MakeGuard([&]{
+    OutputPostProcess<T, Context, PoolType, LowPrecision>::process(
+        Output(0), this->GetOpCalibrationParam());
+  });
+
+  const float* Xdata =
+      (LowPrecision) ? input_lp.data<T>() : X.template data<float>();
+  float* Ydata = Y->template mutable_data<float>();
+
+  EigenMatrixMap<float> Ymat(Ydata, channels, Y->numel() / channels);
+  ConstEigenMatrixMap<float> Xmat(Xdata, channels, X.numel() / channels);
   int pooled_height = Y->dim32(1);
   int pooled_width = kernel_.size() > 1 ? Y->dim32(2) : 1;
   int pooled_depth = kernel_.size() > 2 ? Y->dim32(3) : 1;
@@ -925,6 +1027,17 @@ OPERATOR_SCHEMA(AveragePool)
     .InheritOnnxSchema();
 
 REGISTER_CPU_OPERATOR(
+    AveragePoolLP,
+    PoolOp<float, CPUContext, AveragePool<float>, true>);
+
+OPERATOR_SCHEMA(AveragePoolLP)
+    .NumInputs(1)
+    .NumOutputs(1)
+    .TensorInferenceFunction(ConvPoolOpBase<CPUContext>::TensorInferenceForPool)
+    .FillUsing(MaxPoolDocGenerator(""))
+    .InheritOnnxSchema("AveragePool");
+
+REGISTER_CPU_OPERATOR(
     AveragePool1D,
     PoolOp<float, CPUContext, AveragePool<float>>);
 
@@ -965,6 +1078,15 @@ OPERATOR_SCHEMA(MaxPool)
     .TensorInferenceFunction(ConvPoolOpBase<CPUContext>::TensorInferenceForPool)
     .FillUsing(MaxPoolDocGenerator(""))
     .InheritOnnxSchema();
+
+REGISTER_CPU_OPERATOR(MaxPoolLP, PoolOp<float, CPUContext, MaxPool<float>, true>);
+
+OPERATOR_SCHEMA(MaxPoolLP)
+    .NumInputs(1)
+    .NumOutputs(1)
+    .TensorInferenceFunction(ConvPoolOpBase<CPUContext>::TensorInferenceForPool)
+    .FillUsing(MaxPoolDocGenerator(""))
+    .InheritOnnxSchema("MaxPool");
 
 REGISTER_CPU_OPERATOR(MaxPool1D, PoolOp<float, CPUContext, MaxPool<float>>);
 
