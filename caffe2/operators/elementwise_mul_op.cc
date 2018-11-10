@@ -6,4 +6,12 @@ REGISTER_CPU_OPERATOR(
     Mul,
     BinaryElementwiseOp<NumericTypes, CPUContext, MulFunctor<CPUContext>>);
 
+REGISTER_CPU_OPERATOR(
+    MulLP,
+    BinaryElementwiseOpLP<
+        NumericTypes,
+        CPUContext,
+        MulFunctorLP<CPUContext>,
+        SameTypeAsInput>);
+
 } // namespace caffe2
