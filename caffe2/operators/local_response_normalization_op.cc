@@ -2,8 +2,168 @@
 
 namespace caffe2 {
 
+template <>
+LRNOp<float, CPUContext, false>::LRNOp(
+    const OperatorDef& operator_def,
+    Workspace* ws)
+    : LRNOpBase<float, CPUContext>(operator_def, ws) {}
+
+template <>
+LRNOp<float, CPUContext, true>::LRNOp(
+    const OperatorDef& operator_def,
+    Workspace* ws)
+    : LRNOpBase<float, CPUContext>(operator_def, ws),
+      sqr_lut_(256, 0),
+      power_lut_(256, 0) {
+  float thres_x = this->GetInputCalibrationParam(operator_def.input(0))
+                      ->blob_param(0)
+                      .threshold_y();
+  float thres_sq = 0.0f;
+  float thres_sum_sq = 0.0f;
+  float thres_scale = 0.0f;
+
+  // Get intermediate thresholds
+  for (int i = 0; i < this->GetOpCalibrationParam()->blob_param_size(); ++i) {
+    if (this->GetOpCalibrationParam()->blob_param(i).name() == "sq") {
+      thres_sq = this->GetOpCalibrationParam()->blob_param(i).threshold_y();
+    } else if (
+        this->GetOpCalibrationParam()->blob_param(i).name() == "sum_sq") {
+      thres_sum_sq =
+          this->GetOpCalibrationParam()->blob_param(i).threshold_y();
+    } else if (this->GetOpCalibrationParam()->blob_param(i).name() == "scale") {
+      thres_scale = this->GetOpCalibrationParam()->blob_param(i).threshold_y();
+    }
+  }
+
+  for (int idx = 0; idx < sqr_lut_.size(); ++idx) {
+    float lut_input = thres_x / 128.0 * idx;
+    float lut_output = lut_input * lut_input * 256.0 / thres_sq;
+    lut_output = lut_output * alpha_ / size_;
+    int lut_output_i32 = (int)(lut_output + 0.5);
+    lut_output_i32 = (lut_output_i32 > 255) ? 255 : lut_output_i32;
+    sqr_lut_[idx] = lut_output_i32;
+  }
+
+  for (int idx = 0; idx < power_lut_.size(); ++idx) {
+    float lut_input = idx / (256.0 / thres_sum_sq);
+    float lut_output = pow(lut_input + bias_, -beta_);
+    lut_output = lut_output * (256.0 / thres_scale);
+    int lut_output_i32 = (int)(lut_output + 0.5);
+    lut_output_i32 = (lut_output_i32 > 255) ? 255 : lut_output_i32;
+    power_lut_[idx] = lut_output_i32;
+  }
+}
+
 template<>
-bool LRNOp<float, CPUContext>::RunOnDeviceWithOrderNCHW() {
+bool LRNOp<float, CPUContext, true>::RunOnDeviceWithOrderNCHW() {
+  printf(
+      "bignose test LRNLP %s\n",
+      this->debug_def().op_calibration_param().name().c_str());
+
+  auto& X = Input(0);
+  auto* Y = Output(0);
+  DCHECK_EQ(X.ndim(), 4);
+  const int N = X.dim32(0);
+  const int C = X.dim32(1);
+  const int H = X.dim32(2);
+  const int W = X.dim32(3);
+  const int image_size = C * H * W;
+  // const float* Xdata = X.data<float>();
+  Y->ResizeLike(X);
+  float* Ydata = Y->template mutable_data<float>();
+
+  // quantize input
+  Tensor input_lp{CPUContext::GetDeviceType()};
+  input_lp.CopyFrom(Input(0));
+  float input_threshold =
+      this->GetInputCalibrationParam(this->debug_def().input(0))
+          ->blob_param(0)
+          .threshold_y();
+  input_lp.Quantize<float, int8_t>(128.0f, input_threshold, 0);
+  const float* input_lp_data = input_lp.template data<float>();
+
+  if (OutputSize() > 1) {
+    scale_ = Output(1);
+  } else {
+    if (!scale_) {
+      scale_ = &local_scale_tensor_;
+    }
+  }
+  scale_->ResizeLike(X);
+  float* scale_data = scale_->template mutable_data<float>();
+  // Init the scale data from zero. This is different from the
+  // original fp32 path.
+  math::Set<float, CPUContext>(X.size(), 0, scale_data, &context_);
+  Tensor padded_square(vector<int64_t>{C + size_ - 1, H, W}, CPU);
+  float* padded_square_data = padded_square.template mutable_data<float>();
+  math::Set<float, CPUContext>(
+      padded_square.size(), 0., padded_square_data, &context_);
+  float* buffer_data = padded_square_data + pre_pad_ * H * W;
+  float sumsq_scale = this->GetOpCalibrationParam()->threshold_x_quantized(0);
+  const float alpha_over_size = alpha_ / size_;
+  // go through the images
+  for (int n = 0; n < N; ++n) {
+    // compute the padded square
+    for (int i = 0; i < image_size; ++i) {
+      buffer_data[i] = sqr_lut_[(int)input_lp_data[i + n * image_size]];
+    }
+    // Create the first channel scale
+    for (int c = 0; c < size_; ++c) {
+      math::Axpy<float, CPUContext>(
+          H * W,
+          sumsq_scale,
+          padded_square_data + c * H * W,
+          scale_data + image_size * n,
+          &context_);
+    }
+    for (int c = 1; c < C; ++c) {
+      float* this_scale_slice = scale_data + n * image_size + c * H * W;
+      // copy previous scale
+      context_.CopyFromCPU<float>(
+          H * W, this_scale_slice - H * W, this_scale_slice);
+      // add head
+      math::Axpy<float, CPUContext>(
+          H * W,
+          sumsq_scale,
+          padded_square_data + (c + size_ - 1) * H * W,
+          this_scale_slice,
+          &context_);
+      // subtract tail
+      math::Axpy<float, CPUContext>(
+          H * W,
+          -sumsq_scale,
+          padded_square_data + (c - 1) * H * W,
+          this_scale_slice,
+          &context_);
+    }
+  }
+  CAFFE_ENFORCE(
+      this->GetOpCalibrationParam()->blob_param(3).name() ==
+          std::string("sum_sq"),
+      "no sum_sq");
+  scale_->RightShift<float>(
+      this->GetOpCalibrationParam()->blob_param(3).right_shift_width());
+  scale_->Saturate<float, uint8_t>();
+
+  for (int i = 0; i < Y->size(); ++i) {
+    Ydata[i] = power_lut_[(int)scale_data[i]];
+  }
+  float lrn_scale = this->GetOpCalibrationParam()->threshold_x_quantized(1);
+  for (int i = 0; i < Y->size(); ++i) {
+    Ydata[i] = Ydata[i] * input_lp_data[i] * lrn_scale;
+  }
+
+  Y->RightShift<float>(
+      this->GetOpCalibrationParam()->blob_param(0).right_shift_width());
+  Y->Saturate<float, int8_t>();
+  Y->DequantizeInt8<float>(
+      this->GetOpCalibrationParam()->blob_param(0).threshold_y());
+
+  return true;
+}
+
+template<>
+bool LRNOp<float, CPUContext, false>::RunOnDeviceWithOrderNCHW() {
   // Note(Yangqing): this one is copied from my Caffe implementation.
   auto& X = Input(0);
   auto* Y = Output(0);
@@ -65,8 +225,15 @@ bool LRNOp<float, CPUContext>::RunOnDeviceWithOrderNCHW() {
   return true;
 }
 
+template <>
+bool LRNOp<float, CPUContext, true>::RunOnDeviceWithOrderNHWC() {
+  CAFFE_ENFORCE(false, "unsupprt lrn for nhwc");
+
+  return true;
+}
+
 template<>
-bool LRNOp<float, CPUContext>::RunOnDeviceWithOrderNHWC() {
+bool LRNOp<float, CPUContext, false>::RunOnDeviceWithOrderNHWC() {
   // Note(Yangqing): This one is copied from my Decaf implementation. How many
   // variants have I written...?
   auto& X = Input(0);
@@ -298,6 +465,7 @@ bool LRNGradientOp<float, CPUContext>::RunOnDeviceWithOrderNHWC() {
 }
 
 REGISTER_CPU_OPERATOR(LRN, LRNOp<float, CPUContext>);
+REGISTER_CPU_OPERATOR(LRNLP, LRNOp<float, CPUContext, true>);
 REGISTER_CPU_OPERATOR(LRNGradient, LRNGradientOp<float, CPUContext>);
 
 OPERATOR_SCHEMA(LRN)
@@ -497,6 +665,12 @@ Y_scale:
     .Output(0, "Y", "*(type: Tensor`<float>`)* Output tensor.")
     .Output(1, "Y_scale", "*(type: Tensor`<float>`)* Output scale.")
     .InheritOnnxSchema();
+
+OPERATOR_SCHEMA(LRNLP)
+  .NumInputs(1)
+  .NumOutputs(1, 2)
+  .InheritOnnxSchema();
+
 OPERATOR_SCHEMA(LRNGradient).NumInputs(3).NumOutputs(1);
 
 class GetLRNGradient : public GradientMakerBase {

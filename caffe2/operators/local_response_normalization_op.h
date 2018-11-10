@@ -53,12 +53,11 @@ class LRNOpBase : public Operator<Context> {
   // Input: X; Output: Y, scale.
 };
 
-template <typename T, class Context>
+template <typename T, class Context, bool LowPrecision = false>
 class LRNOp final : public LRNOpBase<T, Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
-  LRNOp(const OperatorDef& operator_def, Workspace* ws)
-      : LRNOpBase<T, Context>(operator_def, ws) {}
+  LRNOp(const OperatorDef& operator_def, Workspace* ws);
 
   bool RunOnDeviceWithOrderNCHW() override;
   bool RunOnDeviceWithOrderNHWC() override;
@@ -68,6 +67,9 @@ class LRNOp final : public LRNOpBase<T, Context> {
   OUTPUT_TAGS(OUTPUT, SCALE);
   Tensor* scale_ = nullptr;
   Tensor local_scale_tensor_{Context::GetDeviceType()};
+
+  std::vector<float> sqr_lut_;
+  std::vector<float> power_lut_;
 };
 
 template <typename T, class Context>
