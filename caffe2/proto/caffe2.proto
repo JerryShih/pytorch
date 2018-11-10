@@ -1,5 +1,7 @@
 syntax = "proto2";
 
+import "caffe2/proto/common_calibration2.proto";
+
 package caffe2;
 
 // A few notes about the Caffe2's protobuffer convention:
@@ -262,6 +264,9 @@ message OperatorDef {
   // the runtime system should check the op_version of each OperatorDef
   // and decide it should reject or accept the model
   optional int64 op_version = 12;
+
+  optional LayerCalibrationParameter op_calibration_param = 20;
+  repeated LayerCalibrationParameter input_calibration_param = 21;
 }
 
 // Network definition.
