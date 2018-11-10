@@ -64,6 +64,23 @@ vector<TensorShape> OperatorBase::InputTensorShapes() const {
   return tps;
 }
 
+const LayerCalibrationParameter*
+OperatorBase::GetInputCalibrationParam(const std::string& name) {
+  const auto& def=debug_def();
+
+  for(int i=0;i<def.input_calibration_param_size();++i){
+    if(def.input_calibration_param(i).name()==name){
+      return &def.input_calibration_param(i);
+    }
+  }
+  return nullptr;
+}
+
+const LayerCalibrationParameter*
+OperatorBase::GetOpCalibrationParam() {
+  return &debug_def().op_calibration_param();
+}
+
 namespace {
 
 PerOpEnginePrefType& g_per_op_engine_pref() {

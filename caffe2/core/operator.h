@@ -440,6 +440,10 @@ class CAFFE2_API OperatorBase : public Observable<OperatorBase> {
   std::unique_ptr<Event> event_;
 
   C10_DISABLE_COPY_AND_ASSIGN(OperatorBase);
+
+ public:
+  const LayerCalibrationParameter* GetInputCalibrationParam(const std::string& name);
+  const LayerCalibrationParameter* GetOpCalibrationParam();
 };
 
 // If your operator does not need any specialized contructor or destructor,
