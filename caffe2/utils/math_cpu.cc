@@ -264,6 +264,7 @@ CAFFE2_SPECIALIZED_DOT(float)
     EigenVectorMap<T>(Y, N) += ConstEigenVectorMap<T>(x, N) * (*alpha);     \
   }
 CAFFE2_SPECIALIZED_AXPY(float)
+CAFFE2_SPECIALIZED_AXPY(int)
 #undef CAFFE2_SPECIALIZED_AXPY
 
 #define CAFFE2_SPECIALIZED_AXPBY(T)                                     \

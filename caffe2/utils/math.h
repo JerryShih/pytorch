@@ -496,14 +496,14 @@ CAFFE2_API void Scale(
 
 template <typename T, class Context>
 CAFFE2_API void
-Axpy(const int N, const float alpha, const T* x, T* y, Context* context);
+Axpy(const int N, const T alpha, const T* x, T* y, Context* context);
 
 // Different from the Axpy function above, if alpha is passed in
 // as a pointer, we will assume that it lives on the Context device,
 // for example on GPU.
 template <typename T, class Context>
 CAFFE2_API void
-Axpy(const int N, const float* alpha, const T* x, T* y, Context* context);
+Axpy(const int N, const T* alpha, const T* x, T* y, Context* context);
 
 template <typename TCoeff, typename TData, class Context>
 CAFFE2_API void Axpby(
