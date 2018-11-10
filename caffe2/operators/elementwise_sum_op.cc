@@ -124,4 +124,15 @@ A after Sum: [[10.  7. 11.]
         "*(type: Tensor`<float>`)* Second tensor to be added element-wise.")
     .Output(0, "C", "*(type: Tensor`<float>`)* Sum of A and B.")
     .InheritOnnxSchema();
+
+REGISTER_CPU_OPERATOR(SumLP, SumOp<CPUContext, true>);
+
+OPERATOR_SCHEMA(SumLP)
+    .NumInputs(1, INT_MAX)
+    .NumOutputs(1)
+    .AllowInplace({{0, 0}})
+    .CostInferenceFunction(CostInferenceForSum)
+    .InputsCanCrossDevices()
+    .IdenticalTypeAndShapeOfInput(0)
+    .InheritOnnxSchema("Sum");
 }

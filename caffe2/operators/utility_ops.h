@@ -246,7 +246,7 @@ class ResizeLikeOp : public Operator<Context> {
   }
 };
 
-template <class Context>
+template <class Context, bool LowPrecision = false>
 class SumOp : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
@@ -276,22 +276,70 @@ class SumOp : public Operator<Context> {
       }
     }
 
-    // Add the first two - works if in-place or not.
-    math::Add(
-        output->numel(),
-        input0.template data<T>(),
-        Input(1).template data<T>(),
-        output_data,
-        &context_);
-    // Add remaining.
-    for (int i = 2; i < InputSize(); ++i) {
+    if (!LowPrecision) {
+      // Add the first two - works if in-place or not.
       math::Add(
           output->numel(),
-          output_data,
-          Input(i).template data<T>(),
+          input0.template data<T>(),
+          Input(1).template data<T>(),
           output_data,
           &context_);
+      // Add remaining.
+      for (int i = 2; i < InputSize(); ++i) {
+        math::Add(
+            output->numel(),
+            output_data,
+            Input(i).template data<T>(),
+            output_data,
+            &context_);
+      }
+    } else {
+      printf("bignose test SumLP %s\n",
+             this->debug_def().op_calibration_param().name().c_str());
+
+      const auto& def = this->debug_def();
+      std::vector<Tensor> quantized_input;
+
+      quantized_input.reserve(InputSize());
+      for (int i = 0; i < InputSize(); ++i) {
+        quantized_input.emplace_back(Context::GetDeviceType());
+        quantized_input[i].CopyFrom(Input(i));
+        if (this->GetInputCalibrationParam(def.input(i))) {
+          float input_threshold = this->GetInputCalibrationParam(def.input(i))
+                                      ->blob_param(0)
+                                      .threshold_y();
+          quantized_input[i].Quantize<T, int8_t>(128.0f, input_threshold, 0);
+        }
+      }
+
+      if (this->GetOpCalibrationParam()) {
+        // Since we use Axpy, we should set all zero to output.
+        math::Set<T, CPUContext>(
+            output->size(), 0, output_data, &context_);
+        for (int i = 0; i < InputSize(); ++i) {
+          T input_scale =
+              this->GetOpCalibrationParam()->threshold_x_quantized(i);
+          math::Axpy(
+              output->size(),
+              input_scale,
+              quantized_input[i].data<T>(),
+              output_data,
+              &context_);
+        }
+      }
+
+      Tensor output_lp(output->dims(), Context::GetDeviceType());
+      output_lp.ShareData(*output);
+      if (this->GetOpCalibrationParam()) {
+        float output_threshold =
+            this->GetOpCalibrationParam()->blob_param(0).threshold_y();
+        float right_shift = this->GetOpCalibrationParam()->right_shift_width();
+        output_lp.RightShift<T>(right_shift);
+        output_lp.Saturate<T, int8_t>();
+        output_lp.DequantizeInt8<T>(output_threshold);
+      }
     }
+
     return true;
   }
 
