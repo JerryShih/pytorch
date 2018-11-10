@@ -6,13 +6,54 @@
 namespace caffe2 {
 
 template <>
-bool LeakyReluOp<float, CPUContext>::RunOnDevice() {
+bool LeakyReluOp<float, CPUContext, false>::RunOnDevice() {
   const auto& X = Input(0);
   auto* Y = Output(0);
   Y->ResizeLike(X);
   ConstEigenVectorMap<float> Xvec(X.template data<float>(), X.numel());
   EigenVectorMap<float> Yvec(Y->template mutable_data<float>(), Y->numel());
   Yvec = Xvec.cwiseMax(0.f) + Xvec.cwiseMin(0.f) * alpha_;
+  return true;
+}
+
+template <>
+bool LeakyReluOp<float, CPUContext, true>::RunOnDevice() {
+  printf(
+      "bignose test LeakyReluOp%s\n",
+      this->debug_def().op_calibration_param().name().c_str());
+
+  Tensor X{CPUContext::GetDeviceType()};
+  auto* Y = Output(0);
+  X.CopyFrom(Input(0));
+  Y->ResizeLike(X);
+
+  float input_threshold =
+      this->GetInputCalibrationParam(this->debug_def().input(0))
+          ->blob_param(0)
+          .threshold_y();
+  X.Quantize<float, int8_t>(128.0f, input_threshold, 0);
+
+  float gt_scale = this->GetOpCalibrationParam()->leakyrelu_param().gt_scale();
+  float le_scale = this->GetOpCalibrationParam()->leakyrelu_param().le_scale();
+  int gt_rshift =
+      this->GetOpCalibrationParam()->leakyrelu_param().gt_right_shift_width();
+  int le_rshift =
+      this->GetOpCalibrationParam()->leakyrelu_param().le_right_shift_width();
+  CAFFE_ENFORCE(gt_rshift >= 0, "leakyRelu gt_rshift");
+  gt_scale *= 1.0f / (1 << gt_rshift);
+  CAFFE_ENFORCE(le_rshift >= 0, "leakyRelu le_rshift");
+  le_scale *= 1.0f / (1 << le_rshift);
+
+  ConstEigenVectorMap<float> Xvec(X.template data<float>(), X.size());
+  EigenVectorMap<float> Yvec(Y->template mutable_data<float>(), Y->size());
+  Yvec = Xvec.cwiseMax(0.f) * gt_scale + Xvec.cwiseMin(0.f) * le_scale;
+
+  float output_threshold =
+      this->GetOpCalibrationParam()->blob_param(0).threshold_y();
+
+  Y->Saturate<float, int8_t>();
+  Y->DequantizeInt8<float>(output_threshold);
+
   return true;
 }
 
@@ -33,6 +74,7 @@ bool LeakyReluGradientOp<float, CPUContext>::RunOnDevice() {
 }
 
 REGISTER_CPU_OPERATOR(LeakyRelu, LeakyReluOp<float, CPUContext>);
+REGISTER_CPU_OPERATOR(LeakyReluLP, LeakyReluOp<float, CPUContext, true>);
 REGISTER_CPU_OPERATOR(
     LeakyReluGradient,
     LeakyReluGradientOp<float, CPUContext>);
@@ -104,6 +146,14 @@ Y:
 )DOC")
     .Input(0, "X", "Input tensor of data to be operated on.")
     .Output(0, "Y", "Output tensor, calculated as described above.");
+
+OPERATOR_SCHEMA(LeakyReluLp)
+    .NumInputs(1)
+    .NumOutputs(1)
+    .Arg("alpha", "*(type: float; default: 0.01)* Coefficient of leakage.")
+    .AllowInplace({{0, 0}})
+    .CostInferenceFunction(PointwiseCostInference<2>)
+    .IdenticalTypeAndShape();
 
 OPERATOR_SCHEMA(LeakyReluGradient)
     .NumInputs(2)
