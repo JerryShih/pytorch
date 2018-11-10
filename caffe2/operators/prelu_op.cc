@@ -4,6 +4,7 @@
 
 #include "caffe2/core/types.h"
 #include "caffe2/utils/cpu_neon.h"
+#include "caffe2/core/scope_guard.h"
 
 namespace caffe2 {
 
@@ -95,7 +96,7 @@ void runNeonPrelu(float* out, const float* in, int size, float w) {
 #endif // defined(__ARM_NEON__) || defined(__ARM_NEON)
 
 template <>
-bool PReluOp<float, CPUContext>::RunOnDevice() {
+bool PReluOp<float, CPUContext, false>::RunOnDevice() {
   const auto& X = Input(0);
   const auto& W = Input(1);
   auto* Y = Output(0);
@@ -158,6 +159,96 @@ bool PReluOp<float, CPUContext>::RunOnDevice() {
       ConstEigenVectorArrayMap<float> Wvec(Wdata, C);
       EigenArrayMap<float> Ymat(Ydata, C, NHW);
       Ymat = (Xmat > 0).select(Xmat, Xmat.colwise() * Wvec);
+      break;
+    }
+    default:
+      CAFFE_THROW("Unknown storage order: ", order_);
+  }
+  return true;
+}
+
+template <>
+bool PReluOp<float, CPUContext, true>::RunOnDevice() {
+  const auto& X = Input(0);
+  const auto& W = Input(1);
+  auto* Y = Output(0);
+  Y->ResizeLike(X);
+  const auto* Xdata = X.template data<float>();
+  const auto* Wdata = W.template data<float>();
+  auto* Ydata = Y->template mutable_data<float>();
+
+  const auto C = order_ == StorageOrder::NCHW ? X.dim(1) : X.dim(X.ndim() - 1);
+  const auto C_shared = (W.size() == 1);
+
+  Tensor input_lp(CPUContext::GetDeviceType());
+  input_lp.CopyFrom(Input(0));
+
+  const auto& def = this->debug_def();
+  if (this->GetInputCalibrationParam(def.input(0))) {
+    float input_threshold = this->GetInputCalibrationParam(def.input(0))
+                                ->blob_param(0)
+                                .threshold_y();
+    input_lp.Quantize<float, int8_t>(128.0f, input_threshold, 0);
+  }
+
+  auto dequantizeOutputGuard = MakeGuard([&] {
+    Tensor* output = Output(0);
+    if (this->GetOpCalibrationParam()) {
+      float output_threshold =
+          this->GetOpCalibrationParam()->blob_param(0).threshold_y();
+
+      output->Saturate<float, int8_t>();
+      output->DequantizeInt8<float>(output_threshold);
+    }
+  });
+
+  const auto* op_calibration_param = this->GetOpCalibrationParam();
+  int ct_gt_rshift = op_calibration_param->prelu_param().gt_right_shift_width();
+  int ct_le_rshift = op_calibration_param->prelu_param().le_right_shift_width();
+  int ct_gt_scale = op_calibration_param->prelu_param().gt_scale();
+  float gt_scale, le_scale;
+
+  CAFFE_ENFORCE_GE(ct_gt_rshift, 0);
+  CAFFE_ENFORCE_GE(ct_le_rshift, 0);
+
+  gt_scale = 1.0f / (1 << ct_gt_rshift);
+  gt_scale *= ct_gt_scale; // gt_scale = ct_gt_scale * 2^ct_gt_rshift
+  le_scale = 1.0f / (1 << ct_le_rshift);
+
+  if (!C_shared) {
+    CAFFE_ENFORCE_EQ(C, W.size());
+  }
+
+  if (C_shared) {
+    ConstEigenVectorMap<float> Xvec(Xdata, X.size());
+    EigenVectorMap<float> Yvec(Ydata, Y->size());
+    Yvec = Xvec.cwiseMax(0.f) * gt_scale + Xvec.cwiseMin(0.f) * (Wdata[0] * le_scale);
+    return true;
+  }
+
+  // non-shared case.
+  switch (order_) {
+    case StorageOrder::NCHW: {
+      const auto N = X.dim(0);
+      const auto dim = X.size_from_dim(2);
+      int nc = 0;
+      for (int n = 0; n < N; ++n) {
+        for (int c = 0; c < C; ++c) {
+          ConstEigenVectorMap<float> Xvec(Xdata + nc * dim, dim);
+          EigenVectorMap<float>(Ydata + nc * dim, dim) =
+              Xvec.cwiseMax(0.f) * gt_scale + Xvec.cwiseMin(0.f) * (Wdata[c] * le_scale);
+          nc++;
+        }
+      }
+      break;
+    }
+    case StorageOrder::NHWC: {
+      // Lay out matrix as (NHW, C) and multiply by C
+      const auto NHW = X.size() / C;
+      ConstEigenArrayMap<float> Xmat(Xdata, C, NHW);
+      ConstEigenVectorArrayMap<float> Wvec(Wdata, C);
+      EigenArrayMap<float> Ymat(Ydata, C, NHW);
+      Ymat = (Xmat > 0).select(Xmat * gt_scale, Xmat.colwise() * Wvec * le_scale);
       break;
     }
     default:
@@ -254,6 +345,7 @@ bool PReluGradientOp<float, CPUContext>::RunOnDevice() {
 }
 
 REGISTER_CPU_OPERATOR(PRelu, PReluOp<float, CPUContext>);
+REGISTER_CPU_OPERATOR(PReluLP, PReluOp<float, CPUContext, true>);
 REGISTER_CPU_GRADIENT_OPERATOR(
     PReluGradient,
     PReluGradientOp<float, CPUContext>);
@@ -335,6 +427,14 @@ Y:
         "1D input slope tensor. If `Slope` is of size 1, the value is shared across different channels")
     .Output(0, "Y", "Output tensor, with same shape as $X$.")
     .InheritOnnxSchema();
+
+// Input: X, Slope, output: Y
+OPERATOR_SCHEMA(PReluLP)
+    .NumInputs(2)
+    .NumOutputs(1)
+    .AllowInplace({{0, 0}})
+    .IdenticalTypeAndShapeOfInput(0)
+    .InheritOnnxSchema("PRelu");
 
 // Input: Y, dY, output: dX
 GRADIENT_OPERATOR_SCHEMA(PReluGradient).NumInputs(4).NumOutputs(2).SetDoc(R"DOC(

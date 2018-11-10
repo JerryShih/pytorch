@@ -7,7 +7,7 @@
 
 namespace caffe2 {
 
-template <typename T, class Context>
+template <typename T, class Context, bool LowPrecision = false>
 class PReluOp final : public Operator<Context> {
  public:
   PReluOp(const OperatorDef& operator_def, Workspace* ws)
