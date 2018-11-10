@@ -5,6 +5,7 @@
 #include "caffe2/core/operator.h"
 #include "caffe2/utils/conversions.h"
 #include "caffe2/utils/math.h"
+#include "caffe2/core/scope_guard.h"
 
 namespace caffe2 {
 
@@ -12,7 +13,8 @@ namespace caffe2 {
 template <
     class Context,
     class Engine = DefaultEngine,
-    bool TransposeWeight = true>
+    bool TransposeWeight = true,
+    bool LowPrecision = false>
 class FullyConnectedOp final : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
@@ -31,6 +33,11 @@ class FullyConnectedOp final : public Operator<Context> {
       typename T_Y,
       typename MATH>
   bool DoRunWithType() {
+    if (LowPrecision) {
+      printf("bignose test FCLP %s\n",
+             this->debug_def().op_calibration_param().name().c_str());
+    }
+
     const auto& X = Input(0);
     const auto& W = Input(1);
     const auto& b = Input(2);
@@ -89,6 +96,10 @@ class FullyConnectedOp final : public Operator<Context> {
       math_type = TensorProto_DataType_FLOAT16;
     }
 
+    QuantizeInput<T_X>();
+    auto dequantizeOutputGuard =
+        MakeGuard([&] { DeQuantizeOutput<T_Y>(); });
+
     // W * x
     math::Gemm<T_X, Context, Engine>(
         CblasNoTrans,
@@ -97,7 +108,7 @@ class FullyConnectedOp final : public Operator<Context> {
         N,
         K,
         1,
-        X.template data<T_X>(),
+        (LowPrecision) ? input_lp.data<T_X>() : X.template data<T_X>(),
         W.template data<T_W>(),
         0,
         Y->template mutable_data<T_Y>(),
@@ -147,6 +158,38 @@ class FullyConnectedOp final : public Operator<Context> {
   Tensor bias_multiplier_{Context::GetDeviceType()};
 
   bool float16_compute_;
+
+ private:
+  template<typename T>
+  void QuantizeInput() {
+    if (LowPrecision) {
+      input_lp.CopyFrom(Input(0));
+
+      const auto& def = this->debug_def();
+      if (this->GetInputCalibrationParam(def.input(0))) {
+        float input_threshold = this->GetInputCalibrationParam(def.input(0))
+                                    ->blob_param(0)
+                                    .threshold_y();
+        input_lp.Quantize<T, int8_t>(128.0f, input_threshold, 0);
+      }
+    }
+  }
+  template<typename T>
+  void DeQuantizeOutput() {
+    if (LowPrecision) {
+      Tensor* output = Output(0);
+      if (this->GetOpCalibrationParam()) {
+        float output_threshold =
+            this->GetOpCalibrationParam()->blob_param(0).threshold_y();
+        float right_shift = this->GetOpCalibrationParam()->right_shift_width();
+        output->RightShift<T>(right_shift);
+        output->Saturate<T, int8_t>();
+        output->DequantizeInt8<T>(output_threshold);
+      }
+    }
+  }
+
+  Tensor input_lp{Context::GetDeviceType()};
 };
 
 template <

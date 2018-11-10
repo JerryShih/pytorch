@@ -5,6 +5,9 @@
 namespace caffe2 {
 
 REGISTER_CPU_OPERATOR(FC, FullyConnectedOp<CPUContext>);
+REGISTER_CPU_OPERATOR(
+    FCLP,
+    FullyConnectedOp<CPUContext, DefaultEngine, true, true>);
 REGISTER_CPU_GRADIENT_OPERATOR(
     FCGradient,
     FullyConnectedGradientOp<CPUContext>);
@@ -255,6 +258,13 @@ Y:
         0,
         "Y",
         "Ouput blob containing a 2D output matrix of shape $(M,N)$, where $M$ is the batch size and $N$ is the number of nodes in the layer. The ouput is calculated as $Y=XW^T+b$.")
+    .InheritOnnxSchema("Gemm");
+
+OPERATOR_SCHEMA(FCLP)
+    .NumInputs(3)
+    .NumOutputs(1)
+    .TensorInferenceFunction(std::bind(FCShapeInference, _1, _2, false))
+    .CostInferenceFunction(std::bind(CostInferenceForFC, _1, _2, false))
     .InheritOnnxSchema("Gemm");
 
 GRADIENT_OPERATOR_SCHEMA(FCGradient)
