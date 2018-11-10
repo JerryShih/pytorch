@@ -1,6 +1,8 @@
 #ifndef CAFFE2_CORE_TENSOR_H_
 #define CAFFE2_CORE_TENSOR_H_
 
+#include <limits>
+
 #include "caffe2/core/storage.h"
 #include "caffe2/core/tensor_impl.h"
 
@@ -429,6 +431,96 @@ class CAFFE2_API Tensor final {
 
   const Storage& storage() const {
     return impl_->storage();
+  }
+
+  template <typename T, typename SaturateDataType>
+  void Quantize(float threshold_x, float threshold_y, int rshift) {
+    T* data = mutable_data<T>();
+    float scale = (threshold_x / threshold_y) * (1 << rshift);
+
+    for (int i = 0; i < size(); ++i) {
+      data[i] *= scale;
+      // data[i]=round(data[i]*scale);
+      // data[i]=floor(data[i]*scale+0.5f);
+    }
+    Saturate<T, SaturateDataType>();
+  }
+
+  template <typename T>
+  void DequantizeInt8(const float threshold) {
+    T* data = mutable_data<T>();
+    float scale = threshold / 128.0f;
+
+    for (int i = 0; i < size(); ++i) {
+      data[i] = data[i] * scale;
+    }
+  }
+
+  template <typename T>
+  void RightShift(const int shift) {
+    CAFFE_ENFORCE_WITH_CALLER(shift >= 0, "the rshift should >=0");
+    // T* data = mutable_data<T>();
+
+    // for(int i=0;i<size();++i){
+    //   int32_t int_value=data[i];
+    //   int_value>>=shift;
+    //   data[i]=int_value;
+    // }
+
+    T* data = mutable_data<T>();
+    float scale = 1.0f / (1 << shift);
+
+    for (int i = 0; i < size(); ++i) {
+      data[i] *= scale;
+    }
+  }
+
+  template <typename T>
+  void LeftShift(const int shift) {
+    CAFFE_ENFORCE_WITH_CALLER(shift >= 0, "the rshift should >=0");
+    // T* data = mutable_data<T>();
+
+    // for(int i=0;i<size();++i){
+    //   int32_t int_value=data[i];
+    //   int_value<<=shift;
+    //   data[i]=int_value;
+    // }
+
+    T* data = mutable_data<T>();
+    float scale = (1 << shift);
+
+    for (int i = 0; i < size(); ++i) {
+      data[i] *= scale;
+    }
+  }
+
+  template <typename T, typename SaturateDataType>
+  void Saturate() {
+    T* data = mutable_data<T>();
+
+    for (int i = 0; i < size(); ++i) {
+      data[i] = floor(data[i] + 0.5);
+
+      data[i] = fmax(data[i], std::numeric_limits<SaturateDataType>::min());
+      data[i] = fmin(data[i], std::numeric_limits<SaturateDataType>::max());
+    }
+  }
+
+  template <typename T, typename DataType>
+  void CheckDataInRange(const char* file_name, int file_line) {
+    T* data = mutable_data<T>();
+
+    for (int i = 0; i < size(); ++i) {
+      if (data[i] > std::numeric_limits<DataType>::max() ||
+          data[i] < std::numeric_limits<DataType>::min()) {
+        printf(
+            "Data[%d]:%f out of range, %s:%d\n",
+            i,
+            (float)data[i],
+            file_name,
+            file_line);
+      }
+    }
   }
 
   bool storage_initialized() const {
