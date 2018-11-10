@@ -5,20 +5,57 @@
 #include "caffe2/operators/conv_op.h"
 
 #include <array>
+#include <functional>
 #include <vector>
 
 #include "caffe2/core/context.h"
 #include "caffe2/core/flags.h"
 #include "caffe2/core/logging.h"
 #include "caffe2/core/operator.h"
+#include "caffe2/core/scope_guard.h"
 #include "caffe2/operators/conv_pool_op_base.h"
 #include "caffe2/utils/eigen_utils.h"
 #include "caffe2/utils/math.h"
 
 namespace caffe2 {
 
-template <typename T, class Context>
-bool ConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
+template <typename T, class Context, bool LowPrecision>
+void ConvOp<T, Context, LowPrecision>::QuantizeInput() {
+  if (LowPrecision) {
+    input_lp.CopyFrom(Input(INPUT));
+
+    const auto& def = this->debug_def();
+    if (this->GetInputCalibrationParam(def.input(INPUT))) {
+      float input_threshold = this->GetInputCalibrationParam(def.input(INPUT))
+                                  ->blob_param(0)
+                                  .threshold_y();
+      input_lp.Quantize<T, int8_t>(128.0f, input_threshold, 0);
+    }
+  }
+}
+
+template <typename T, class Context, bool LowPrecision>
+void ConvOp<T, Context, LowPrecision>::DeQuantizeOutput() {
+  if (LowPrecision) {
+    Tensor* output = Output(0);
+    if (this->GetOpCalibrationParam()) {
+      float output_threshold =
+          this->GetOpCalibrationParam()->blob_param(0).threshold_y();
+      float right_shift = this->GetOpCalibrationParam()->right_shift_width();
+      output->RightShift<T>(right_shift);
+      output->Saturate<T, int8_t>();
+      output->DequantizeInt8<T>(output_threshold);
+    }
+  }
+}
+
+template <typename T, class Context, bool LowPrecision>
+bool ConvOp<T, Context, LowPrecision>::RunOnDeviceWithOrderNCHW() {
+  if (LowPrecision) {
+    printf("bignose test convLP %s\n",
+           this->debug_def().op_calibration_param().name().c_str());
+  }
+
   const auto& X = Input(INPUT);
   const auto& filter = Input(FILTER);
   auto* Y = Output(0);
@@ -62,9 +99,12 @@ bool ConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
   const int Y_stride = M * Y_HxW;
   const int filter_stride = filter.numel() / G;
 
+  QuantizeInput();
+  auto dequantizeOutputGuard = MakeGuard([&] { DeQuantizeOutput(); });
+
   // The col buffer is stored in CHW order as well - kernel_dim, and the height
   // and width.
-  const T* X_data = X.template data<T>();
+  const T* X_data = (LowPrecision) ? input_lp.data<T>() : X.template data<T>();
   const T* filter_data = filter.template data<T>();
   const T* bias_data = nullptr;
   if (InputSize() == 3) {
@@ -182,8 +222,13 @@ bool ConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
 }
 
 // The implementations.
-template <typename T, class Context>
-bool ConvOp<T, Context>::RunOnDeviceWithOrderNHWC() {
+template <typename T, class Context, bool LowPrecision>
+bool ConvOp<T, Context, LowPrecision>::RunOnDeviceWithOrderNHWC() {
+  if (LowPrecision) {
+    printf("bignose test convLP %s\n",
+           this->debug_def().op_calibration_param().name().c_str());
+  }
+
   CAFFE_ENFORCE_LE(
       kernel_.size(),
       3,
@@ -230,10 +275,13 @@ bool ConvOp<T, Context>::RunOnDeviceWithOrderNHWC() {
   const int input_offset = X_HxW * C;
   const int output_offset = Y->numel() / Y->dim32(0);
 
+  QuantizeInput();
+  auto dequantizeOutputGuard = MakeGuard([&] { DeQuantizeOutput(); });
+
   // The output image size is the spatial size of the output.
   // The col buffer is stored in HWC order as well - the height and width, and
   // kernel_dim.
-  const T* X_data = X.template data<T>();
+  const T* X_data = (LowPrecision) ? input_lp.data<T>() : X.template data<T>();
   const T* filter_data = filter.template data<T>();
   const T* bias_data = nullptr;
   if (InputSize() == 3) {
@@ -347,8 +395,8 @@ bool ConvOp<T, Context>::RunOnDeviceWithOrderNHWC() {
   return true;
 }
 
-template <typename T, class Context>
-bool ConvOp<T, Context>::Run1x1ConvOnDeviceWithOrderNCHW(
+template <typename T, class Context, bool LowPrecision>
+bool ConvOp<T, Context, LowPrecision>::Run1x1ConvOnDeviceWithOrderNCHW(
     const int N,
     const int C,
     const int HxW,
@@ -429,8 +477,8 @@ bool ConvOp<T, Context>::Run1x1ConvOnDeviceWithOrderNCHW(
   return true;
 }
 
-template <typename T, class Context>
-bool ConvOp<T, Context>::Run1x1ConvOnDeviceWithOrderNHWC(
+template <typename T, class Context, bool LowPrecision>
+bool ConvOp<T, Context, LowPrecision>::Run1x1ConvOnDeviceWithOrderNHWC(
     const int N,
     const int C,
     const int HxW,

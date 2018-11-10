@@ -10,7 +10,7 @@ C10_DECLARE_bool(caffe2_force_shared_col_buffer);
 
 namespace caffe2 {
 
-template <typename T, class Context>
+template <typename T, class Context, bool LowPrecision=false>
 class ConvOp final : public ConvPoolOpBase<Context> {
  public:
   USE_CONV_POOL_BASE_FUNCTIONS(Context);
@@ -62,6 +62,11 @@ class ConvOp final : public ConvPoolOpBase<Context> {
   // Input: X, W, b
   // Output: Y
   INPUT_TAGS(INPUT, FILTER, BIAS);
+
+  void QuantizeInput();
+  void DeQuantizeOutput();
+
+  Tensor input_lp{Context::GetDeviceType()};
 };
 
 template <typename T, class Context>

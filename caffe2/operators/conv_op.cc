@@ -175,6 +175,17 @@ OPERATOR_SCHEMA(Conv)
     .FillUsing(ConvDocGenerator(""))
     .InheritOnnxSchema();
 
+REGISTER_CPU_OPERATOR(ConvLP, ConvOp<float, CPUContext, true>);
+
+OPERATOR_SCHEMA(ConvLP)
+    .NumInputs(2, 3)
+    .NumOutputs(1)
+    .TensorInferenceFunction(ConvPoolOpBase<CPUContext>::TensorInferenceForConv)
+    .CostInferenceFunction(OpSchema::CostInferenceFunctionType(
+        ConvPoolOpBase<CPUContext>::CostInferenceForConv))
+    .FillUsing(ConvDocGenerator(""))
+    .InheritOnnxSchema("Conv");
+
 REGISTER_CPU_OPERATOR(Conv1D, ConvOp<float, CPUContext>);
 
 OPERATOR_SCHEMA(Conv1D)
