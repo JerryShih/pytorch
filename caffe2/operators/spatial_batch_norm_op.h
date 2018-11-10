@@ -11,10 +11,11 @@
 #include "caffe2/core/operator.h"
 #include "caffe2/utils/eigen_utils.h"
 #include "caffe2/utils/math.h"
+#include "caffe2/core/scope_guard.h"
 
 namespace caffe2 {
 
-template <class Context>
+template <class Context, bool LowPrecision = false>
 class SpatialBNOp : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
@@ -46,6 +47,11 @@ class SpatialBNOp : public Operator<Context> {
 
   template <typename T>
   bool DoRunWithType() {
+    if (LowPrecision) {
+      printf("bignose test SpatialBNLP %s\n",
+             this->debug_def().op_calibration_param().name().c_str());
+    }
+
     const auto& X = Input(INPUT);
     const auto& scale = Input(SCALE);
     const auto& bias = Input(BIAS);
@@ -73,6 +79,42 @@ class SpatialBNOp : public Operator<Context> {
     beta_.Resize(C);
     T* alpha_data = alpha_.template mutable_data<T>();
     T* beta_data = beta_.template mutable_data<T>();
+
+    QuantizeInput<T>();
+    auto dequantizeOutputGuard =
+        MakeGuard([&] { DeQuantizeOutput<T>(); });
+
+    if (LowPrecision) {
+      CAFFE_ENFORCE_EQ(N, 1);
+      const auto& mean = Input(EST_MEAN);
+      const auto& var = Input(EST_VAR);
+      std::vector<int> input_dims(
+          input_lp.dims().cbegin(), input_lp.dims().cend());
+      std::vector<int> mean_dims(mean.dims().cbegin(), mean.dims().cend());
+      std::vector<int> var_dims(var.dims().cbegin(), var.dims().cend());
+
+      math::Mul(
+          input_dims.size(),
+          input_dims.data(),
+          var_dims.size(),
+          var_dims.data(),
+          input_lp.template data<T>(),
+          var.template data<T>(),
+          Y_data,
+          &context_);
+      math::Add(
+          input_dims.size(),
+          input_dims.data(),
+          mean_dims.size(),
+          mean_dims.data(),
+          Y_data,
+          mean.template data<T>(),
+          Y_data,
+          &context_);
+
+      return true;
+    }
+
     if (is_test_) {
       if (N == 0) {
         return true;
@@ -250,11 +292,42 @@ class SpatialBNOp : public Operator<Context> {
         alpha_arr * ConstEigenVectorArrayMap<T>(mean, C);
   }
 
+  template<typename T>
+  void QuantizeInput() {
+    if (LowPrecision) {
+      input_lp.CopyFrom(Input(0));
+
+      const auto& def = this->debug_def();
+      if (this->GetInputCalibrationParam(def.input(0))) {
+        float input_threshold = this->GetInputCalibrationParam(def.input(0))
+                                    ->blob_param(0)
+                                    .threshold_y();
+        input_lp.Quantize<T, int8_t>(128.0f, input_threshold, 0);
+      }
+    }
+  }
+  template<typename T>
+  void DeQuantizeOutput() {
+    if (LowPrecision) {
+      Tensor* output = Output(0);
+      if (this->GetOpCalibrationParam()) {
+        float output_threshold =
+            this->GetOpCalibrationParam()->blob_param(0).threshold_y();
+        float right_shift = this->GetOpCalibrationParam()->right_shift_width();
+        output->RightShift<T>(right_shift);
+        output->Saturate<T, int8_t>();
+        output->DequantizeInt8<T>(output_threshold);
+      }
+    }
+  }
+
   const bool is_test_;
   double epsilon_;
   const float momentum_;
   const StorageOrder order_;
   const int num_batches_;
+
+  Tensor input_lp{Context::GetDeviceType()};
 
   Tensor alpha_{Context::GetDeviceType()};
   Tensor beta_{Context::GetDeviceType()};
