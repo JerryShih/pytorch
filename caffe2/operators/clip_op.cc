@@ -1,10 +1,12 @@
 #include "caffe2/operators/clip_op.h"
 #include "caffe2/utils/eigen_utils.h"
+#include <cmath>
+#include <limits>
 
 namespace caffe2 {
 
 template <>
-bool ClipOp<float, CPUContext>::RunOnDevice() {
+bool ClipOp<float, CPUContext, false>::RunOnDevice() {
   auto& X = Input(0);
   auto* Y = Output(0);
   Y->ResizeLike(X);
@@ -12,6 +14,50 @@ bool ClipOp<float, CPUContext>::RunOnDevice() {
       ConstEigenVectorMap<float>(X.data<float>(), X.numel())
           .cwiseMax(min_)
           .cwiseMin(max_);
+  return true;
+}
+
+template <>
+bool ClipOp<float, CPUContext, true>::RunOnDevice() {
+  printf("bignose test FCLP %s\n",
+      this->debug_def().op_calibration_param().name().c_str());
+
+  Tensor input_lp(CPUContext::GetDeviceType());
+  input_lp.CopyFrom(Input(0));
+  auto* Y = Output(0);
+  float max = max_;
+  float min = min_;
+
+  const auto& def = this->debug_def();
+  if (this->GetInputCalibrationParam(def.input(0))) {
+    float input_threshold = this->GetInputCalibrationParam(def.input(0))
+                                ->blob_param(0)
+                                .threshold_y();
+    input_lp.Quantize<float, int8_t>(128.0f, input_threshold, 0);
+
+    max = static_cast<int>(max / input_threshold * 128.0f);
+    min = static_cast<int>(min / input_threshold * 128.0f);
+
+    // Saturate the clip max and min value to s8 type.
+    max = std::fmax(max, std::numeric_limits<int8_t>::min());
+    max = std::fmin(max, std::numeric_limits<int8_t>::max());
+    min = std::fmax(min, std::numeric_limits<int8_t>::min());
+    min = std::fmin(min, std::numeric_limits<int8_t>::max());
+  }
+
+  Y->ResizeLike(input_lp);
+  EigenVectorMap<float>(Y->template mutable_data<float>(), Y->size()) =
+      ConstEigenVectorMap<float>(input_lp.data<float>(), input_lp.size())
+          .cwiseMax(min)
+          .cwiseMin(max);
+
+  if (this->GetOpCalibrationParam()) {
+    float output_threshold =
+        this->GetOpCalibrationParam()->blob_param(0).threshold_y();
+    Y->Saturate<float, int8_t>();
+    Y->DequantizeInt8<float>(output_threshold);
+  }
+
   return true;
 }
 
@@ -33,6 +79,7 @@ bool ClipGradientOp<float, CPUContext>::RunOnDevice() {
 }
 
 REGISTER_CPU_OPERATOR(Clip, ClipOp<float, CPUContext>);
+REGISTER_CPU_OPERATOR(ClipLP, ClipOp<float, CPUContext, true>);
 REGISTER_CPU_GRADIENT_OPERATOR(ClipGradient, ClipGradientOp<float, CPUContext>);
 
 OPERATOR_SCHEMA(Clip)
@@ -111,6 +158,13 @@ Y: [[45. 20. 59. 60. 48.]
         0,
         "Y",
         "*(Tensor`<float>`)* Output tensor clipped within range [`min`, `max`].")
+    .InheritOnnxSchema();
+
+OPERATOR_SCHEMA(ClipLP)
+    .NumInputs(1)
+    .NumOutputs(1)
+    .AllowInplace({{0, 0}})
+    .IdenticalTypeAndShape()
     .InheritOnnxSchema();
 
 GRADIENT_OPERATOR_SCHEMA(ClipGradient)

@@ -10,7 +10,7 @@
 
 namespace caffe2 {
 
-template <typename T, class Context>
+template <typename T, class Context, bool LowPrecision = false>
 class ClipOp final : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
